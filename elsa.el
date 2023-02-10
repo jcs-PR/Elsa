@@ -5,6 +5,8 @@
 ;; Author: Matúš Goljer <matus.goljer@gmail.com>
 ;; Maintainer: Matúš Goljer <matus.goljer@gmail.com>
 ;; Created: 23rd March 2017
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "25.1") (trinary "1.0.0") (f "0") (dash "2.14") (cl-lib "0.3"))
 ;; Keywords: languages, lisp
 
 ;; This program is free software; you can redistribute it and/or
@@ -45,7 +47,7 @@
 (require 'elsa-extension-builtin)
 
 (require 'elsa-typed-syntax)
- ;; TODO: figure out how to load these based on `(require)' forms
+;; TODO: figure out how to load these based on `(require)' forms
 (require 'elsa-typed-thingatpt)
 (require 'elsa-typed-subr)
 
