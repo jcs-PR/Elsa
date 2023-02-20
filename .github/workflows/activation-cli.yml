@@ -1,4 +1,4 @@
-name: test
+name: Activation CLI
 
 on:
   push:
@@ -10,9 +10,6 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  UNDERCOVER_CONFIG: "(\"elsa.el\" \"elsa-*.el\" (:report-format lcov) (:send-report nil))"
 
 jobs:
   test:
@@ -49,33 +46,13 @@ jobs:
       with:
         version: 'snapshot'
 
-    - uses: actions/checkout@v2
-
-    - name: Test
-      run: |
-        eask install-deps --dev
-        eask exec buttercup -L . -L tests
-
-    - name: Coveralls
-      uses: coverallsapp/github-action@master
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        flag-name: emacs-${{ matrix.emacs-version }}
-        parallel: true
-
+    - uses: actions/checkout@v3
+      
+    - name: Grant execution permission
+      if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest'
+      run: chmod -R 777 ./tests/fixtures/dummy-package/
+      
     - name: Run tests
+      shell: bash
       run: |
-        eask clean all
-        eask package
-        eask install
-        eask compile
-
-  finish:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-    - name: Coveralls Finished
-      uses: coverallsapp/github-action@master
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        parallel-finished: true
+        ./tests/fixtures/dummy-package/run.sh
