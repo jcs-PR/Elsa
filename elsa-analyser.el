@@ -274,7 +274,10 @@ The BINDING should have one of the following forms:
                       (elsa-type-describe var-type)
                       (elsa-type-describe (elsa-get-type val)))))))))))
     (oset form type (oref (-last-item args) type))
-    (oset form narrow-types (oref (-last-item args) narrow-types))))
+    (oset form narrow-types
+          (list (elsa-variable :name (elsa-get-name (car (-last-item assignments)))
+                               :type (elsa-type-make-non-nullable
+                                      (elsa-get-type (cadr (-last-item assignments)))))))))
 
 (defun elsa--analyse:cond (form scope state)
   (let ((branches (cdr (oref form sequence)))
@@ -389,22 +392,31 @@ The BINDING should have one of the following forms:
 (defun elsa--analyse:or (form scope state)
   (let* ((body (elsa-cdr form))
          (return-type (elsa-type-nil))
-         ;; (can-be-nil-p :: bool)
-         (can-be-nil-p t))
+         (condition-reachable (trinary-true)))
     (elsa-save-scope scope
       (-each body
         (lambda (arg)
-          (elsa--analyse-form arg scope state)
-          (when can-be-nil-p
-            (setq return-type (elsa-type-sum return-type (oref arg type))))
-          (unless (elsa-type-accept arg (elsa-type-nil))
-            (setq can-be-nil-p nil))
-          (elsa-scope-narrow-var scope (oref arg narrow-types)
-                                 'elsa-variable-diff))))
+          (elsa-with-reachability state condition-reachable
+            (elsa--analyse-form arg scope state)
+            (when (trinary-possible-p condition-reachable)
+              (setq return-type
+                    (elsa-type-sum return-type (oref arg type))))
+            (elsa-scope-narrow-var scope (oref arg narrow-types)
+                                   'elsa-variable-diff)
+            (setq condition-reachable
+                  (trinary-and
+                   condition-reachable
+                   (elsa-type-is-nil arg)))))))
     (-when-let (grouped (elsa-variables-group-and-sum
-                         (-non-nil (--mapcat (oref it narrow-types) body))))
+                         (->> body
+                              (--filter (trinary-possible-p (elsa-form-reachable it)))
+                              (--mapcat (oref it narrow-types))
+                              (-non-nil))))
       (oset form narrow-types grouped))
-    (unless can-be-nil-p
+
+    ;; If the last form is definitely never reachable, the form always
+    ;; succeds and we make it non-nullable.
+    (when (trinary-false-p condition-reachable)
       (setq return-type (elsa-type-make-non-nullable return-type)))
     (oset form type return-type)))
 
@@ -424,6 +436,38 @@ The BINDING should have one of the following forms:
                   (trinary-and
                    condition-reachable
                    (elsa-type-is-non-nil arg)))))))
+
+    (let ((narrowed-vars
+           ;; get a union of all narrowed variables
+           (-uniq
+            (--map
+             (elsa-get-name it)
+             (-non-nil
+              (--mapcat (oref it narrow-types) body))))))
+      ;; update narrowing of all the forms by the variables they don't
+      ;; have assigned to their narrow-types
+      (-each body
+        (lambda (arg)
+          (let ((nil-always-accepts (elsa-type-could-accept
+                                     (elsa-type-nil)
+                                     (elsa-get-type arg)))
+                (narrow-types (oref arg narrow-types)))
+            ;; add uncertainty to narrowing of all narrowed variables
+            ;; if this form can fail.
+            (when (trinary-maybe-p nil-always-accepts)
+              (-each narrowed-vars
+                (lambda (var-name)
+                  (when (--none? (eq var-name (elsa-get-name it)) narrow-types)
+                    (push (elsa-variable
+                           :name var-name
+                           ;; intersect with mixed will keep the
+                           ;; original type, but the (un)certainty
+                           ;; will propagate
+                           :type (elsa-type-mixed)
+                           :certainty (trinary-maybe))
+                          narrow-types))))
+              (oset arg narrow-types narrow-types))))))
+
     ;; Group all the narrowing variables by name and intersect the
     ;; narrowing types, because we require all forms to be
     ;; simultaneously true.  Set the resulting intersections on this
@@ -435,18 +479,19 @@ The BINDING should have one of the following forms:
                       (--mapcat (oref it narrow-types))
                       (-non-nil))))
       (oset form narrow-types grouped))
+
     (cond
      ((trinary-false-p condition-reachable)
       (setq return-type (elsa-type-nil)))
-     ;; If we emptied the domain of any narrowed variable, this
-     ;; condition can never be true, because there is no value that
-     ;; the variable can inhibit to satisfy all conditions.
-     ((-any-p
-       (lambda (var) (elsa-type-equivalent-p (oref var type) (elsa-type-empty)))
-       (oref form narrow-types))
-      (setq return-type (elsa-type-nil)))
      (body
-      (setq return-type (elsa-type-make-nullable (oref (-last-item body) type)))))
+      (setq return-type (oref (-last-item body) type))))
+
+    ;; If the last form is not definitely reachable, it means we
+    ;; could've failed somewhere inside the and form and we need to
+    ;; make the return type nullable.
+    (unless (trinary-necessary-p condition-reachable)
+      (setq return-type (elsa-type-make-nullable return-type)))
+
     (oset form type return-type)))
 
 (defun elsa--get-default-function-types (args)
@@ -585,7 +630,7 @@ The registered object can be a `defun', `defmacro', or
                          :return (elsa-type-mixed))
                   :arglist (elsa-form-to-lisp args))))))
 
-(defun elsa--analyse:defmacro (form scope state)
+(defun elsa--analyse:defmacro (form _scope state)
   "just skip for now, it's too complicated."
   (let ((name (elsa-get-name (elsa-cadr form)))
         (args (elsa-nth 2 form)))
@@ -701,14 +746,14 @@ If no type annotation is provided, find the value type through
                                  (oref (-last-item body) type)
                                (elsa-make-type nil))))))
 
-(defun elsa--analyse:function (form scope state)
+(defun elsa--analyse:function (form _scope _state)
   (let* ((arg (elsa-cadr form))
          (name (elsa-get-name arg))
          (type (elsa-function-get-type name)))
     (when (and type (elsa-form-symbol-p arg))
       (oset form type type))))
 
-(defun elsa--analyse:quote (form scope state)
+(defun elsa--analyse:quote (form _scope state)
   (oset state quoted (trinary-true))
   (let ((arg (cadr (oref form sequence))))
     (cond
@@ -956,8 +1001,8 @@ SCOPE and STATE are the scope and state objects."
                                    "No overload matches this call.\n%s"
                                    (s-join
                                     "\n"
-                                    (-map-indexed
-                                     (lambda (index err)
+                                    (-map
+                                     (lambda (err)
                                        (format "  Overload %d of %d: '%s'\n    %s"
                                                (1+ (nth 1 err))
                                                (length all-overloads)
@@ -1030,6 +1075,13 @@ SCOPE and STATE are the scope and state objects."
 
 FORM is a result of `elsa-read-form'."
   (oset form reachable (elsa-state-get-reachability state))
+  (when-let ((annotation (oref form annotation)))
+    (cond
+     ((eq (car annotation) 'var)
+      (let ((var (elsa-scope-get-var scope (cadr annotation))))
+        ;; update the type in the current scope
+        (oset var type (eval `(elsa-make-type ,@(nthcdr 3 annotation))))))))
+
   (cond
    ((elsa-form-float-p form) (elsa--analyse-float form scope state))
    ((elsa-form-integer-p form) (elsa--analyse-integer form scope state))
@@ -1047,8 +1099,7 @@ FORM is a result of `elsa-read-form'."
              (params (oref state lsp-params)))
     (cond
      ((equal method "textDocument/hover")
-      (-let* (((&HoverParams :text-document (&TextDocumentIdentifier :uri)
-                             :position (&Position :line :character))
+      (-let* (((&HoverParams :position (&Position :line :character))
                params))
         (when (and (= (oref form line) (1+ line))
                    (<= (oref form column) character)

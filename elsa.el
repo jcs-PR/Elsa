@@ -59,7 +59,8 @@
 
 ;; TODO: unify with `elsa-variable'?
 
-(defvar elsa-global-state (elsa-global-state))
+(defvar elsa-global-state (elsa-global-state)
+  "Global state holding elsa analysis context.")
 
 (defmacro elsa-in-file (file)
   "Specify the current file for registering new structures."
@@ -184,11 +185,10 @@ tokens."
   (setq global-state (or global-state elsa-global-state))
   (elsa-log "[%s] Processing file %s"
             (elsa-global-state-get-counter global-state) file)
-  (let ((state (elsa-state))
+  (let ((state (elsa-state :global-state global-state))
         (form))
     (elsa-state-clear-file-state global-state file)
     (oset global-state current-file file)
-    (oset state global-state global-state)
     (with-temp-buffer
       (insert-file-contents file)
       (emacs-lisp-mode)
@@ -296,18 +296,23 @@ GLOBAL-STATE is the initial configuration."
         form)
     (with-current-buffer config-buffer
       (condition-case _err
-          (while (setq form (read (current-buffer)))
-            (pcase form
-              (`(register-extensions . ,extensions)
-               (--each extensions
-                 (unless (require (intern (concat "elsa-extension-" (symbol-name it))) nil t)
-                   (princ (format "An error occured during startup: Extension %s not found\n" (symbol-name it))))))
-              (`(register-ruleset . ,rulesets)
-               (--each rulesets
-                 (let ((ruleset-constructor (intern (concat "elsa-ruleset-" (symbol-name it)))))
-                   (if (functionp ruleset-constructor)
-                       (elsa-ruleset-load (funcall ruleset-constructor))
-                     (princ (format "An error occured during startup: Ruleset %s not found\n" (symbol-name it)))))))))
+          (progn
+            (goto-char (point-min))
+            (while (setq form (read (current-buffer)))
+              (pcase form
+                (`(register-extensions . ,extensions)
+                 (--each extensions
+                   (if (require (intern (concat "elsa-extension-" (symbol-name it))) nil t)
+                       (elsa-log "Loaded extension for %s" (symbol-name it))
+                     (princ (format "An error occured during startup: Extension %s not found\n" (symbol-name it))))))
+                (`(register-ruleset . ,rulesets)
+                 (--each rulesets
+                   (let ((ruleset-constructor (intern (concat "elsa-ruleset-" (symbol-name it)))))
+                     (if (functionp ruleset-constructor)
+                         (progn
+                           (elsa-ruleset-load (funcall ruleset-constructor))
+                           (elsa-log "Loaded ruleset %s" (symbol-name it)))
+                       (princ (format "An error occured during startup: Ruleset %s not found\n" (symbol-name it))))))))))
         (end-of-file t)))))
 
 (defun elsa-run ()

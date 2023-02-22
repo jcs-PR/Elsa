@@ -25,23 +25,6 @@
                (not (listp (nthcdr len cell))))
       (nthcdr len cell))))
 
-;; TODO: this will be easier to do later when we properly push quoted
-;; types up.  The check will then be just for a symbol and a quote
-(defun elsa--quoted-symbol-p (form &optional quote-types)
-  "Return non-nil if FORM represents a quoted symbol."
-  (setq quote-types (or quote-types (list 'quote)))
-  (when (memq (oref form quote-type) quote-types)
-    (-when-let (seq (elsa-form-sequence form))
-      (when (= (length seq) 2)
-        (elsa-form-symbol-p (cadr seq))))))
-
-(defun elsa--quoted-symbol-name (form)
-  "Return the name of quoted symbol that FORM represents.
-
-Nil if FORM is not a quoted symbol."
-  (when (elsa--quoted-symbol-p form)
-    (elsa-get-name (cadr (elsa-form-sequence form)))))
-
 (defsubst elsa--quote-p (symbol)
   "Return non-nil if SYMBOL is a type of quote."
   (memq symbol (list
@@ -69,8 +52,26 @@ Nil if FORM is not a quoted symbol."
    (type :type elsa-type :initarg :type :initform (elsa-make-type mixed))
    (narrow-types :initarg :narrow-type :initform nil)
    (reachable :type trinary :initarg :reachable :initform (trinary-true))
-   (parent :type (or elsa-form nil) :initarg :parent))
+   (parent :type (or elsa-form nil) :initarg :parent)
+   (annotation :type list :initarg :annotation :initform nil))
   :abstract t)
+
+;; TODO: this will be easier to do later when we properly push quoted
+;; types up.  The check will then be just for a symbol and a quote
+(defun elsa--quoted-symbol-p (form &optional quote-types)
+  "Return non-nil if FORM represents a quoted symbol."
+  (setq quote-types (or quote-types (list 'quote)))
+  (when (memq (oref form quote-type) quote-types)
+    (-when-let (seq (elsa-form-sequence form))
+      (when (= (length seq) 2)
+        (elsa-form-symbol-p (cadr seq))))))
+
+(defun elsa--quoted-symbol-name (form)
+  "Return the name of quoted symbol that FORM represents.
+
+Nil if FORM is not a quoted symbol."
+  (when (elsa--quoted-symbol-p form)
+    (elsa-get-name (cadr (elsa-form-sequence form)))))
 
 ;; (elsa-form-sequence :: (function (mixed) (list mixed)))
 (cl-defgeneric elsa-form-sequence (form)
@@ -199,7 +200,7 @@ This only makes sense for the sequence forms:
       nil
     (error "Can not get sequence out of symbol form")))
 
-(cl-defgeneric elsa-form-sequence-p (this)
+(cl-defgeneric elsa-form-sequence-p (_this)
   nil)
 
 (cl-defmethod elsa-form-sequence-p ((this elsa-form-symbol))
@@ -559,7 +560,7 @@ prefix and skipped by the sexp scanner.")
 (cl-defmethod elsa-form-to-lisp ((this elsa-form-function))
   (oref this function))
 
-(defun elsa--read-function (form state)
+(defun elsa--read-function (form _state)
   (elsa--skip-whitespace-forward)
   (elsa-form-function
    :type (elsa-make-type (function (&rest mixed) mixed))
@@ -615,15 +616,16 @@ STATE is Elsa local state."
   (cond
    ;; type annotation
    ((and (or (eq (cadr comment-form) ::)
-             (eq (nth 2 comment-form) ::))
-         (elsa-form-sequence-p reader-form))
+             (eq (nth 2 comment-form) ::)))
     (let ((annotation-name (car comment-form))
-          (form-name (elsa-get-name (cadr (elsa-form-sequence reader-form)))))
+          (form-name (and (elsa-form-sequence-p reader-form)
+                          (elsa-get-name (cadr (elsa-form-sequence reader-form))))))
       (cond
-       ((or (elsa-form-function-call-p reader-form 'defun)
-            (elsa-form-function-call-p reader-form 'defsubst)
-            (elsa-form-function-call-p reader-form 'cl-defmethod)
-            (elsa-form-function-call-p reader-form 'cl-defgeneric))
+       ((and (elsa-form-sequence-p reader-form)
+             (or (elsa-form-function-call-p reader-form 'defun)
+                 (elsa-form-function-call-p reader-form 'defsubst)
+                 (elsa-form-function-call-p reader-form 'cl-defmethod)
+                 (elsa-form-function-call-p reader-form 'cl-defgeneric)))
         (when (and state (not (eq form-name annotation-name)))
           (elsa-state-add-message state
             (elsa-make-warning (elsa-nth 1 reader-form)
@@ -636,10 +638,11 @@ STATE is Elsa local state."
                              ((symbolp (nth 2 comment-form))
                               (eval `(elsa-make-type (function () ,@(cddr comment-form)))))
                              (t (eval `(elsa-make-type ,@(cddr comment-form))))))))
-       ((or (elsa-form-function-call-p reader-form 'defvar)
-            (elsa-form-function-call-p reader-form 'defcustom)
-            (elsa-form-function-call-p reader-form 'defconst)
-            (eq (car comment-form) 'defvar))
+       ((and (elsa-form-sequence-p reader-form)
+             (or (elsa-form-function-call-p reader-form 'defvar)
+                 (elsa-form-function-call-p reader-form 'defcustom)
+                 (elsa-form-function-call-p reader-form 'defconst)
+                 (eq (car comment-form) 'defvar)))
         (when (eq (car comment-form) 'defvar)
           (!cdr comment-form))
         (when (and state (not (eq form-name annotation-name)))
@@ -651,6 +654,8 @@ STATE is Elsa local state."
         (elsa-state-add-defvar state
           (elsa-defvar :name (elsa-get-name (cadr (oref reader-form sequence)))
                        :type (eval `(elsa-make-type ,@(cddr comment-form))))))
+       ((eq annotation-name 'var)
+        (oset reader-form annotation comment-form))
        (t
         ;; annotation which is not on defun or defvar will be assumed
         ;; to annotate a variable
